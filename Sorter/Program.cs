@@ -59,6 +59,7 @@ namespace Sorter
             if (!File.Exists(path))
             {
                 Console.Write("The file does not exist. Press any key to continue.");
+                Console.ReadKey();
                 GetFilePath();
             }
             StartSorting(path);
