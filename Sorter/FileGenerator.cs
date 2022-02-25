@@ -5,7 +5,7 @@ namespace Sorter
 {
     public class FileGenerator
     {
-        public static void Generate(int fileSizeGb, string filePath = "GeneratedFile.txt")
+        public static void Generate(double fileSizeGb, string filePath = "GeneratedFile.txt")
         {
             if (File.Exists(filePath))
             {

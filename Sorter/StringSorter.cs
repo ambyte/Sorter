@@ -3,74 +3,89 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace Sorter
 {
     public class StringSorter
     {
-        private const long MaxBlockSizeInBytes = 40000000;
         private string _tempFolder;
 
         public StringSorter()
         {
-            _tempFolder = Path.Combine(Path.GetTempPath(), "sorter");
+            _tempFolder = "sorter";
         }
 
         public void SortFile(string filePath)
         {
             var splittedFiles = SplitFile(filePath);
-            var sortedFiles = SortBlocks(splittedFiles);
-            var fileResult = MergeBlocks(sortedFiles);
-            ReplaceOriginalFileWithSorted(filePath, fileResult);
+            var sortedFiles = SortSplittedFiles(splittedFiles);
+            MergeSortedFiles(filePath, sortedFiles);
         }
 
-        private List<string> SplitFile(string filePath)
+        private List<string> SplitFile(string inputFile)
         {
-            var files = new List<string>();
-            if (Directory.Exists(_tempFolder)) Directory.Delete(_tempFolder, true);
+            if (Directory.Exists(_tempFolder))
+            {
+                Directory.Delete(_tempFolder);
+            }
             Directory.CreateDirectory(_tempFolder);
-            long sizeOfBlockInBytes = 0;
-            using var reader = new StreamReader(filePath);
-            string line = reader.ReadLine();
-            var sb = new StringBuilder();
-            while (line != null)
-            {
+            var unsortedChunkFiles = new List<string>();
+            const int chunkSize = 10 * 1024 * 1024;
+            byte[] buffer = new byte[chunkSize];
+            List<byte> extraBuffer = new List<byte>();
 
-                sizeOfBlockInBytes += line.Length;
-                if (sizeOfBlockInBytes > MaxBlockSizeInBytes)
+            using (Stream input = File.OpenRead(inputFile))
+            {
+                int index = 0;
+                while (input.Position < input.Length)
                 {
-                    files.Add(CreateNewBlock(sb, files.Count));
-                    sb.Clear();
-                    sizeOfBlockInBytes = line.Length;
+                    string unsortedFilePath = Path.Combine(_tempFolder, $"unsorted{index}");
+                    using (Stream output = File.Create(unsortedFilePath))
+                    {
+                        int chunkBytesRead = 0;
+                        while (chunkBytesRead < chunkSize)
+                        {
+                            int bytesRead = input.Read(buffer, chunkBytesRead, chunkSize - chunkBytesRead);
+                            if (bytesRead == 0)
+                            {
+                                break;
+                            }
+                            chunkBytesRead += bytesRead;
+                        }
+                        byte extraByte = buffer[chunkSize - 1];
+                        while (extraByte != '\n')
+                        {
+                            int flag = input.ReadByte();
+                            if (flag == -1)
+                            {
+                                break;
+                            }
+                            extraByte = (byte)flag;
+                            extraBuffer.Add(extraByte);
+                        }
+                        output.Write(buffer, 0, chunkBytesRead);
+                        if (extraBuffer.Count > 0)
+                        {
+                            output.Write(extraBuffer.ToArray(), 0, extraBuffer.Count);
+                        }
+                        extraBuffer.Clear();
+                    }
+                    unsortedChunkFiles.Add(unsortedFilePath);
+                    index++;
                 }
-                sb.AppendLine(line);
-                line = reader.ReadLine();
             }
-            if (sb.Length > 0)
-            {
-                files.Add(CreateNewBlock(sb, files.Count));
-            }
-            return files;
+            return unsortedChunkFiles;
         }
 
-        private string CreateNewBlock(StringBuilder sb, int count)
-        {
-            var filePath = $"{_tempFolder}/block{count}.txt";            
-            using StreamWriter file = new StreamWriter(filePath);
-            file.Write(sb);
-            return filePath;
-        }
-
-        private List<string> SortBlocks(List<string> splittedFiles)
+        private List<string> SortSplittedFiles(List<string> splittedFiles)
         {
             using var files = new BlockingCollection<string>();
             var taskList = new List<Task>();
             for (int i = 0; i < splittedFiles.Count; i++)
 {
                 taskList.Add(SortBlock(splittedFiles[i], i, files));
-                if (i % 4 == 0)
+                if (i + 1 % 8 == 0)
                 {
                     Task.WaitAll(taskList.ToArray());
                     taskList.Clear();
@@ -79,7 +94,7 @@ namespace Sorter
             if (taskList.Count>0)
             {
                 Task.WaitAll(taskList.ToArray());
-            }
+            }            
             foreach (var file in splittedFiles)
             {
                 File.Delete(file);
@@ -91,101 +106,60 @@ namespace Sorter
         {
             var task = new Task(() =>
             {
-                using var reader = new StreamReader(filePath);
+                var reader = new StreamReader(filePath);
                 string[] strings = reader.ReadToEnd().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
                 var listData = strings.Select(x => new Record(x)).ToList();
                 listData.Sort();
-                var sortedFileName = $"{_tempFolder}/sorted{index}.txt";            
-                using var writer = new StreamWriter(sortedFileName);
+                var sortedFileName = Path.Combine(_tempFolder, $"sorted{index}");
+                var writer = new StreamWriter(sortedFileName);
                 writer.Write(string.Join(Environment.NewLine, listData));
+                listData = null;                
+                reader.Close();
+                writer.Close();
                 ts.Add(sortedFileName);
             });
             task.Start();
             return task;
-        }        
-
-        private string MergeBlocks(List<string> files)
-        {
-            int mergeGeneration = 1;
-            List<Task> taskList = new List<Task>(); ;
-            while (files.Count > 1)
-            {
-                int filesToDeleteCount = files.Count;
-                for (int i = 0; i < filesToDeleteCount; i++)
-                {
-                    if (i + 1 >= filesToDeleteCount)
-                    {
-                        filesToDeleteCount--;
-                        break;
-                    }
-                    taskList.Add(MergeTwoFiles(files[i], files[i + 1], $"{_tempFolder}/{mergeGeneration}merge{i}.txt"));
-                    files.Add($"{_tempFolder}/{mergeGeneration}merge{i}.txt");
-                    i++;
-                    mergeGeneration++;
-                }
-                Task.WaitAll(taskList.ToArray());
-                taskList.Clear();
-                DeleteUnnecessaryFiles(filesToDeleteCount, files);
-            }
-            return files[0];
         }
 
-
-        private Task MergeTwoFiles(string firstFilePath, string secondFilePath, string outputFileName)
-        {
-            var task = new Task(() =>
-            {
-                using var writer = new StreamWriter(outputFileName);
-                using var firstReader = new StreamReader(firstFilePath);
-                using var secondReader = new StreamReader(secondFilePath);
-
-                string leftString = firstReader.ReadLine();
-                string rightString = secondReader.ReadLine();
-
-                while (!String.IsNullOrEmpty(leftString) && !String.IsNullOrEmpty(rightString))
-                {
-                    if (new Record(leftString).CompareTo(new Record(rightString)) < 0)
-                    {
-                        writer.WriteLine(leftString);
-                        leftString = firstReader.ReadLine();
-                    }
-                    else
-                    {
-                        writer.WriteLine(rightString);
-                        rightString = secondReader.ReadLine();
-                    }
-                }
-
-                while (!String.IsNullOrEmpty(leftString))
-                {
-                    writer.WriteLine(leftString);
-                    leftString = firstReader.ReadLine();
-                }
-
-                while (!String.IsNullOrEmpty(rightString))
-                {
-                    writer.WriteLine(rightString);
-                    rightString = secondReader.ReadLine();
-                }
-
-            });
-            task.Start();
-            return task;
-        }
-
-        private void DeleteUnnecessaryFiles(int filesToDeleteCount, List<string> files)
-        {
-            for (int i = 0; i < filesToDeleteCount; i++)
-            {
-                File.Delete(files[i]);
-            }
-            files.RemoveRange(0, filesToDeleteCount);
-        }
-
-        private void ReplaceOriginalFileWithSorted(string originalFilePath, string sortedFilePath)
+        private static void MergeSortedFiles(string originalFilePath, List<string> sortedFiles)
         {
             File.Delete(originalFilePath);
-            File.Move(sortedFilePath,originalFilePath);
+            List<StreamReader> readers = new List<StreamReader>();
+            List<Record> layer = new List<Record>(readers.Count);
+            foreach (string file in sortedFiles)
+            {
+                var reader = new StreamReader(File.OpenRead(file));
+                readers.Add(reader);
+                layer.Add(new Record(reader.ReadLine()));
+            }
+            var writter = new StreamWriter(originalFilePath);
+            int Id = 0;
+            while (readers.Count > 0)
+            {
+                var min = layer.Min();
+                Id = layer.IndexOf(min);
+                var line = readers[Id].ReadLine();
+                if (line == null)
+                {
+                    layer.RemoveAt(Id);
+                    readers[Id].Close();
+                    readers.RemoveAt(Id);
+                }
+                else
+                {
+                    layer[Id] = new Record(line);
+
+                }
+                writter.WriteLine(min);
+            }
+
+            writter.Close();
+            foreach (string file in sortedFiles)
+            {
+                File.Delete(file);
+            }
         }
+
     }
 }

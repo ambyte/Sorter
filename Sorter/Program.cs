@@ -35,7 +35,7 @@ namespace Sorter
 
             var rows = Console.ReadLine();
 
-            if (!int.TryParse(rows, out int fileSizeGb))
+            if (!double.TryParse(rows, out double fileSizeGb))
             {
                 return;
             }
